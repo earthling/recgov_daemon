@@ -8,11 +8,14 @@ https://www.recreation.gov/use-our-data
 https://ridb.recreation.gov/docs#/
 """
 import datetime
+import json
 import logging
 import os
 from typing import Tuple, Dict, Sequence
 
 import requests
+
+AVAILABILITY_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 logger = logging.getLogger(__name__)
 
@@ -25,63 +28,79 @@ FACILITY_ID_FIELD = "FacilityID"
 FACILITY_NAME_FIELD = "FacilityName"
 
 
+class AvailabilityProvider(object):
+    def request_availability(self, facility_id: str, start_date: datetime) -> Dict:
+        pass
+
+    def get_availability(self, facility_id: str, start_date: datetime.datetime) -> Dict[str, Sequence[Dict]]:
+
+        available_sites = dict()
+        max_look_ahead_months = 3
+        months_fetched = 0
+        while start_date and months_fetched < max_look_ahead_months:
+            data = self.request_availability(facility_id, start_date)
+            months_fetched += 1
+
+            campsites = data["campsites"]
+            for site_id, site_data in campsites.items():
+                # The _first_ entry in the list of sites seems to represent the
+                # campground itself. The 'campsite_type' is 'MANAGER'. This entry
+                # is interesting because it has a list of dates in a 'quantities'
+                # field. I have observed that when this list does not contain the
+                # last day of the month, there will be no availability information
+                # after the last day of the quantities list.
+                quantities = site_data["quantities"]
+                if len(quantities) > 0:
+                    start_date = extract_next_month(quantities)
+
+                availabilities = site_data["availabilities"]
+                for date, status in availabilities.items():
+                    if status.lower() == "available":
+                        sites = available_sites.setdefault(date, [])
+                        sites.append(site_data)
+
+        return available_sites
+
+
+class OnlineAvailabilityProvider(AvailabilityProvider):
+    def request_availability(self, facility_id: str, start_date: datetime):
+        # They will accept this user agent, but will not accept the python requests default
+        headers = {
+            "user-agent": "curl/7.68.0"
+        }
+
+        # The API is very picky about date formats, only the year and month are allowed to vary.
+        query = {
+            "start_date": datetime.datetime.strftime(start_date, "%Y-%m-01T00:00:00.000Z")
+        }
+
+        url = "https://www.recreation.gov/api/camps/availability/campground/%s/month" % facility_id
+        response = requests.get(url, headers=headers, params=query, timeout=60)
+        if not response.ok:
+            print(response.request.headers)
+            raise ValueError("Unable to access RIDB API. Check connection and API key.")
+        return response.json()
+
+
+class OfflineAvailabilityProvider(AvailabilityProvider):
+    def __init__(self, *args):
+        self.response_files = list(args)
+        self.response_files.reverse()
+
+    def request_availability(self, facility_id: str, start_date: datetime) -> Dict:
+        response_file = self.response_files.pop()
+        with open(response_file, "r") as data:
+            return json.load(data)
+
+
 def extract_next_month(quantities) -> datetime.datetime:
     last_date = None
     for date, zero in quantities.items():
         last_date = date
     # 2022-09-10T00:00:00Z
-    date = datetime.datetime.strptime(last_date, "%Y-%m-%dT%H:%M:%SZ")
+    date = datetime.datetime.strptime(last_date, AVAILABILITY_DATETIME_FORMAT)
     next_date = date + datetime.timedelta(days=1)
     return next_date if date.month < next_date.month else None
-
-
-def get_availability_for_campground(facility_id: str, start_date: datetime.datetime) -> Dict[str, Sequence[Dict]]:
-
-    available_sites = dict()
-    max_look_ahead_months = 3
-    months_fetched = 0
-    while start_date and months_fetched < max_look_ahead_months:
-        data = request_availability(facility_id, start_date)
-        months_fetched += 1
-
-        campsites = data["campsites"]
-        for site_id, site_data in campsites.items():
-            # The _first_ entry in the list of sites seems to represent the
-            # campground itself. The 'campsite_type' is 'MANAGER'. This entry
-            # is interesting because it has a list of dates in a 'quantities'
-            # field. I have observed that when this list does not contain the
-            # last day of the month, there will be no availability information
-            # after the last day of the quantities list.
-            quantities = site_data["quantities"]
-            if len(quantities) > 0:
-                start_date = extract_next_month(quantities)
-
-            availabilities = site_data["availabilities"]
-            for date, status in availabilities.items():
-                if status.lower() == "available":
-                    sites = available_sites.setdefault(date, [])
-                    sites.append(site_data)
-
-    return available_sites
-
-
-def request_availability(facility_id: str, start_date: datetime):
-    # They will accept this user agent, but will not accept the python requests default
-    headers = {
-        "user-agent": "curl/7.68.0"
-    }
-
-    # The API is very picky about date formats, only the year and month are allowed to vary.
-    query = {
-        "start_date": datetime.datetime.strftime(start_date, "%Y-%m-01T00:00:00.000Z")
-    }
-
-    url = "https://www.recreation.gov/api/camps/availability/campground/%s/month" % facility_id
-    response = requests.get(url, headers=headers, params=query, timeout=60)
-    if not response.ok:
-        print(response.request.headers)
-        raise ValueError("Unable to access RIDB API. Check connection and API key.")
-    return response.json()
 
 
 def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> [Tuple[str, str]]:
@@ -135,17 +154,19 @@ def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> 
 
     return facilities
 
+
 def run():
     """
     Runs the RIDB interface module for specific values, should be used for debugging only.
     """
     # lat = 35.994431       # these are the coordinates for Ponderosa Campground
     # lon = -121.394325
-    lat = 38.951209         # coordinates for Emerald Bay, Lake Tahoe
+    lat = 38.951209  # coordinates for Emerald Bay, Lake Tahoe
     lon = -120.106420
     radius = 10
     campgrounds = get_facilities_from_ridb(lat, lon, radius)
     print(campgrounds)
+
 
 if __name__ == "__main__":
     run()
