@@ -60,6 +60,89 @@ class Stay(Criteria):
         return matches
 
 
+class MinimumStayLength(Criteria):
+    def __init__(self, nights: int):
+        self._nights = nights
+        self._sites = {}
+
+    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
+        for site in sites:
+            availability = self._sites.setdefault(site, list())
+            availability.append(d)
+        return True
+
+    def matches(self) -> Dict:
+        results = {}
+        for site, dates in self._sites.items():
+            spans = consecutive(dates)
+            for span in spans:
+                start, end = span
+                if end - start >= self._nights:
+                    runs = results.setdefault(site, [])
+                    runs.append(dates[start:end])
+        return results
+
+
+class MaximumStayLength(Criteria):
+
+    def __init__(self):
+        self._sites = {}
+
+    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
+        for site in sites:
+            availability = self._sites.setdefault(site, list())
+            availability.append(d)
+        return True
+
+    def matches(self) -> Dict:
+        max_nights = -1
+        max_site = None
+        max_span = None
+        for site, dates in self._sites.items():
+            spans = consecutive(dates)
+            for span in spans:
+                start, end = span
+                if end - start > max_nights:
+                    max_nights = end - start
+                    max_span = span
+                    max_site = site
+
+        if max_site is None:
+            return dict()
+
+        dates = self._sites[max_site]
+        result = {}
+        start, end = max_span
+        result[max_site] = dates[start:end]
+        return result
+
+
+def consecutive(dates: typing.List[dt.date]) -> [typing.Tuple]:
+    runs = []
+    dates.sort()
+    previous = None
+    start = 0
+    end = 0
+    current = 0
+    for d in dates:
+        if previous is None:
+            previous = d
+            current += 1
+            continue
+
+        span = d - previous
+        previous = d
+        if span.days > 1:
+            # not consecutive
+            runs.append((start, end + 1))
+            start = current
+        else:
+            end = current
+        current += 1
+    runs.append((start, end + 1))
+    return runs
+
+
 class ExactDateSearch(Criteria):
     def __init__(self, dates):
         self._dates = dates
@@ -168,6 +251,28 @@ class SearchAvailabilityTest(unittest.TestCase):
         matches = search(self.availability, stays)
         # [print(f"{key} {value}") for key, value in matches.items()]
         self.assertEqual(4, len(matches))
+
+    def test_search_for_consecutive_days(self):
+        # MinimumStayLength.consecutive([sept(25)])
+        # MinimumStayLength.consecutive([sept(25), sept(26)])
+        # MinimumStayLength.consecutive([sept(25), sept(26), sept(28), sept(29), sept(30)])
+        nights = MinimumStayLength(3)
+        matches = search(self.availability, nights)
+        self.assertTrue(len(matches) > 1)
+
+    def test_search_for_maximum_stay(self):
+        maximum = MaximumStayLength()
+        matches = search(self.availability, maximum)
+        for key, value in matches.items():
+            self.assertEqual(5, len(value))
+
+
+def sept(date: int):
+    return dt.date(2022, 9, date)
+
+
+def oct(date: int):
+    return dt.date(2022, 10, date)
 
 
 if __name__ == '__main__':
