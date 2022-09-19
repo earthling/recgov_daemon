@@ -11,7 +11,7 @@ import datetime
 import json
 import logging
 import os
-from typing import Tuple, Dict, Sequence
+from typing import Tuple, Dict
 
 import requests
 
@@ -32,7 +32,7 @@ class AvailabilityProvider(object):
     def request_availability(self, facility_id: str, start_date: datetime) -> Dict:
         pass
 
-    def get_availability(self, facility_id: str, start_date: datetime.datetime) -> Dict[str, Sequence[Dict]]:
+    def get_availability(self, facility_id: str, start_date: datetime.datetime) -> Dict[str, Dict]:
 
         available_sites = dict()
         max_look_ahead_months = 3
@@ -53,11 +53,17 @@ class AvailabilityProvider(object):
                 if len(quantities) > 0:
                     start_date = extract_next_month(quantities)
 
-                availabilities = site_data["availabilities"]
-                for date, status in availabilities.items():
+                availability_data = site_data.pop("availabilities")
+                availabilities = []
+                for date, status in availability_data.items():
                     if status.lower() == "available":
-                        sites = available_sites.setdefault(date, [])
-                        sites.append(site_data)
+                        available_date = datetime.datetime.strptime(date, AVAILABILITY_DATETIME_FORMAT)
+                        availabilities.append(available_date.date())
+
+                if len(availabilities) > 0:
+                    site_data = available_sites.setdefault(site_id, site_data)
+                    site_availabilities = site_data.setdefault("availabilities", set())
+                    site_availabilities.update(availabilities)
 
         return available_sites
 

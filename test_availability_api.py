@@ -7,18 +7,18 @@ from typing import Dict
 from dateutil.relativedelta import relativedelta
 from dateutil.rrule import *
 
-from ridb_interface import OnlineAvailabilityProvider, OfflineAvailabilityProvider, AVAILABILITY_DATETIME_FORMAT
+from ridb_interface import OnlineAvailabilityProvider, OfflineAvailabilityProvider
 
 
 class Criteria(object):
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
         return False
 
     def matches(self) -> Dict:
         return {}
 
     @staticmethod
-    def days_of_week(nights_to_stay: [int], start_date: dt.date = None, look_ahead_months: int = 3):
+    def days_of_week(*nights_to_stay: [int], start_date: dt.date = None, look_ahead_months: int = 3):
         if start_date is None:
             start_date = dt.date.today()
 
@@ -44,9 +44,9 @@ class Stay(Criteria):
     def __init__(self, *criteria: [Criteria]):
         self.criteria = criteria
 
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
         for criteria in self.criteria:
-            criteria.test(d, sites)
+            criteria.test(site_id, dates)
         return True
 
     def matches(self) -> Dict:
@@ -65,56 +65,44 @@ class MinimumStayLength(Criteria):
         self._nights = nights
         self._sites = {}
 
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
-        for site in sites:
-            availability = self._sites.setdefault(site, list())
-            availability.append(d)
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
+        dates = list(dates)
+        spans = consecutive(dates)
+        for span in spans:
+            start, end = span
+            if end - start >= self._nights:
+                runs = self._sites.setdefault(site_id, [])
+                runs.append(dates[start:end])
         return True
 
     def matches(self) -> Dict:
-        results = {}
-        for site, dates in self._sites.items():
-            spans = consecutive(dates)
-            for span in spans:
-                start, end = span
-                if end - start >= self._nights:
-                    runs = results.setdefault(site, [])
-                    runs.append(dates[start:end])
-        return results
+        return self._sites
 
 
 class MaximumStayLength(Criteria):
 
     def __init__(self):
         self._sites = {}
+        self._max_nights = -1
+        self._max_site = None
+        self._max_dates = None
 
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
-        for site in sites:
-            availability = self._sites.setdefault(site, list())
-            availability.append(d)
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
+        dates = list(dates)
+        spans = consecutive(dates)
+        for span in spans:
+            start, end = span
+            if end - start > self._max_nights:
+                self._max_nights = end - start
+                self._max_dates = dates[start:end]
+                self._max_site = site_id
         return True
 
     def matches(self) -> Dict:
-        max_nights = -1
-        max_site = None
-        max_span = None
-        for site, dates in self._sites.items():
-            spans = consecutive(dates)
-            for span in spans:
-                start, end = span
-                if end - start > max_nights:
-                    max_nights = end - start
-                    max_span = span
-                    max_site = site
-
-        if max_site is None:
+        if self._max_site is None:
             return dict()
 
-        dates = self._sites[max_site]
-        result = {}
-        start, end = max_span
-        result[max_site] = dates[start:end]
-        return result
+        return {self._max_site: self._max_dates}
 
 
 def consecutive(dates: typing.List[dt.date]) -> [typing.Tuple]:
@@ -144,13 +132,14 @@ def consecutive(dates: typing.List[dt.date]) -> [typing.Tuple]:
 
 
 class ExactDateSearch(Criteria):
-    def __init__(self, dates):
-        self._dates = dates
+    def __init__(self, *dates: [dt.date]):
+        self._dates = set(dates)
         self._matches = dict()
 
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
-        if d in self._dates:
-            self._matches[d] = sites
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
+        matches = dates.intersection(self._dates)
+        if len(matches) > 0:
+            self._matches[site_id] = matches
         return True
 
     def matches(self) -> Dict:
@@ -159,34 +148,22 @@ class ExactDateSearch(Criteria):
 
 class DatesInSameCampsite(Criteria):
     def __init__(self, *dates: [dt.date]):
-        self._dates = dates
+        self._dates = set(dates)
         self._matches = dict()
 
-    def test(self, d: dt.date, sites: typing.Set[str]) -> bool:
-        if d in self._dates:
-            if len(self._matches) == 0:
-                self._matches[d] = sites
-            else:
-                for date_key, site_ids_value in self._matches.items():
-                    sites.intersection_update(site_ids_value)
-                    if len(sites) == 0:
-                        self._matches.clear()
-                        return False
-                    else:
-                        self._matches[date_key] = sites
-
-                self._matches[d] = sites
+    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
+        if self._dates.issubset(dates):
+            self._matches[site_id] = self._dates
         return True
 
     def matches(self) -> Dict:
-        return self._matches if len(self._matches) == len(self._dates) else {}
+        return self._matches
 
 
 def search(availability: Dict, criteria: Criteria) -> Dict:
-    for date_key, sites in availability.items():
-        test_date = dt.datetime.strptime(date_key, AVAILABILITY_DATETIME_FORMAT)
-        site_ids = set([site["site"] for site in sites])
-        if not criteria.test(test_date.date(), site_ids):
+    for site_id, site_data in availability.items():
+        available_dates = site_data["availabilities"]
+        if not criteria.test(site_id, available_dates):
             break
     return criteria.matches()
 
@@ -207,55 +184,53 @@ class SearchAvailabilityTest(unittest.TestCase):
     def setUp(self) -> None:
         self.provider = OfflineAvailabilityProvider("availability-09.json", "availability-10.json")
         self.availability = self.provider.get_availability("232876", dt.datetime.now())
-        # for date_key, sites in self.availability.items():
-        #     site_ids = [site["site"] for site in sites]
-        #     print(f"{date_key} = {site_ids}")
+        # self.print_by_date()
+
+    def print_by_date(self):
+        by_date = dict()
+        for site_id, site_data in self.availability.items():
+            dates = site_data["availabilities"]
+            for d in dates:
+                sites = by_date.setdefault(d, [])
+                sites.append(site_id)
+        keys = sorted(list(by_date.keys()))
+        for key in keys:
+            sites = by_date[key]
+            print("%s = %s" % (key.isoformat(), sites))
 
     def test_search_no_availability(self):
-        matches = search(self.availability, ExactDateSearch([dt.date(2022, 9, 24)]))
+        matches = search(self.availability, ExactDateSearch(sept(24)))
         self.assertEqual(0, len(matches), "No matches expected")
 
     def test_search_specific_dates_available(self):
-        matches = search(self.availability, ExactDateSearch([dt.date(2022, 9, 20), dt.date(2022, 9, 21)]))
-        self.assertEqual(2, len(matches))
+        matches = search(self.availability, ExactDateSearch(sept(20), sept(21)))
+        self.assertEqual(20, len(matches))
 
     def test_search_dates_in_same_campsite(self):
-        first = dt.date(2022, 9, 25)
-        second = dt.date(2022, 9, 26)
-        matches = search(self.availability, DatesInSameCampsite(first, second))
+        matches = search(self.availability, DatesInSameCampsite(sept(25), sept(26)))
         self.assertEqual(2, len(matches))
-        self.assertEqual(matches[first], matches[second])
-        self.assertEqual({'004', '005'}, matches[first])
 
     def test_search_no_dates_in_same_campsite(self):
-        first = dt.date(2022, 10, 9)
-        second = dt.date(2022, 10, 10)
-        matches = search(self.availability, DatesInSameCampsite(first, second))
+        matches = search(self.availability, DatesInSameCampsite(oct(9), oct(10)))
         self.assertEqual(0, len(matches))
 
     def test_search_for_stays(self):
-        stays = Stay(DatesInSameCampsite(dt.date(2022, 9, 25), dt.date(2022, 9, 26)),
-                     DatesInSameCampsite(dt.date(2022, 10, 9), dt.date(2022, 10, 10)))
+        stays = Stay(DatesInSameCampsite(sept(25), sept(26)),
+                     DatesInSameCampsite(oct(9), oct(10)))
         matches = search(self.availability, stays)
         self.assertEqual(2, len(matches))
-        self.assertEqual({'004', '005'}, matches[dt.date(2022, 9, 25)])
-        self.assertEqual({'004', '005'}, matches[dt.date(2022, 9, 26)])
 
     def test_search_for_weekends(self):
-        stays = Criteria.days_of_week([FR, SA])
+        stays = Criteria.days_of_week(FR, SA)
         matches = search(self.availability, stays)
         self.assertEqual(0, len(matches))
 
     def test_search_midweek(self):
-        stays = Criteria.days_of_week([SU, MO])
+        stays = Criteria.days_of_week(SU, MO)
         matches = search(self.availability, stays)
-        # [print(f"{key} {value}") for key, value in matches.items()]
-        self.assertEqual(4, len(matches))
+        self.assertEqual(20, len(matches))
 
     def test_search_for_consecutive_days(self):
-        # MinimumStayLength.consecutive([sept(25)])
-        # MinimumStayLength.consecutive([sept(25), sept(26)])
-        # MinimumStayLength.consecutive([sept(25), sept(26), sept(28), sept(29), sept(30)])
         nights = MinimumStayLength(3)
         matches = search(self.availability, nights)
         self.assertTrue(len(matches) > 1)
@@ -271,6 +246,7 @@ def sept(date: int):
     return dt.date(2022, 9, date)
 
 
+# noinspection PyShadowingBuiltins
 def oct(date: int):
     return dt.date(2022, 10, date)
 
