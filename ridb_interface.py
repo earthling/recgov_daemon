@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from typing import Tuple, Dict
-
+import datetime as dt
 import requests
 
 AVAILABILITY_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -29,10 +29,10 @@ FACILITY_NAME_FIELD = "FacilityName"
 
 
 class AvailabilityProvider(object):
-    def request_availability(self, facility_id: str, start_date: datetime) -> Dict:
+    def request_availability(self, facility_id: str, start_date: dt.date) -> Dict:
         pass
 
-    def get_availability(self, facility_id: str, start_date: datetime.datetime) -> Dict[str, Dict]:
+    def get_availability(self, facility_id: str, start_date: dt.date) -> Dict[str, Dict]:
 
         available_sites = dict()
         max_look_ahead_months = 3
@@ -69,7 +69,7 @@ class AvailabilityProvider(object):
 
 
 class OnlineAvailabilityProvider(AvailabilityProvider):
-    def request_availability(self, facility_id: str, start_date: datetime):
+    def request_availability(self, facility_id: str, start_date: dt.date):
         # They will accept this user agent, but will not accept the python requests default
         headers = {
             "user-agent": "curl/7.68.0"
@@ -77,7 +77,7 @@ class OnlineAvailabilityProvider(AvailabilityProvider):
 
         # The API is very picky about date formats, only the year and month are allowed to vary.
         query = {
-            "start_date": datetime.datetime.strftime(start_date, "%Y-%m-01T00:00:00.000Z")
+            "start_date": dt.datetime.strftime(start_date, "%Y-%m-01T00:00:00.000Z")
         }
 
         url = "https://www.recreation.gov/api/camps/availability/campground/%s/month" % facility_id
@@ -93,20 +93,20 @@ class OfflineAvailabilityProvider(AvailabilityProvider):
         self.response_files = list(args)
         self.response_files.reverse()
 
-    def request_availability(self, facility_id: str, start_date: datetime) -> Dict:
+    def request_availability(self, facility_id: str, start_date: dt.date) -> Dict:
         response_file = self.response_files.pop()
         with open(response_file, "r") as data:
             return json.load(data)
 
 
-def extract_next_month(quantities) -> datetime.datetime:
+def extract_next_month(quantities) -> dt.date:
     last_date = None
     for date, zero in quantities.items():
         last_date = date
     # 2022-09-10T00:00:00Z
-    date = datetime.datetime.strptime(last_date, AVAILABILITY_DATETIME_FORMAT)
+    date = dt.datetime.strptime(last_date, AVAILABILITY_DATETIME_FORMAT)
     next_date = date + datetime.timedelta(days=1)
-    return next_date if date.month < next_date.month else None
+    return next_date.date() if date.month < next_date.month else None
 
 
 def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> [Tuple[str, str]]:

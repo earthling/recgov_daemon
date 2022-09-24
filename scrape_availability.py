@@ -4,7 +4,7 @@ scrape_availability.py
 Webpage interface for recov daemon. Responsible for interacting with recreation.gov via selenium
 webdriver and with beautifulsoup after selenium has retrieved the availability table.
 """
-
+import atexit
 import logging
 import traceback
 from signal import signal, SIGINT
@@ -23,7 +23,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.chrome.options import Options
 from campground import Campground
-from utils import exit_gracefully, setup_logging
+from utils import exit_gracefully, setup_logging, quit_selenium
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,16 @@ TABLE_LOADING_TAG_CLASS = "rec-table-overlay-loading"
 CAMP_LOCATION_NAME_ICON = "camp-location-name--icon"
 TUTORIAL_CLOSE_BUTTON_XPATH = "/html/body/div[11]/div/div/div/div/div/div/div/button"
 PAGE_LOAD_WAIT = 60
+
+
+class SeleniumAvailabilityProvider(object):
+    def __init__(self):
+        self._driver = create_selenium_driver()
+        atexit.register(quit_selenium, self._driver)
+
+    def search(self, campground: Campground, start_date: datetime, num_days: int, num_sites: int = 1) -> bool:
+        return scrape_campground(self._driver, campground, start_date, num_days, num_sites)
+
 
 def parse_html_table(table: BeautifulSoup) -> DataFrame:
     """

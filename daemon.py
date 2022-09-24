@@ -5,25 +5,28 @@ Main module for recgov daemon. Runs scrape_availabilty methods in a loop to dete
 for a list of campgrounds provided by the user or found in RIDB search.
 """
 
-from signal import signal, SIGINT
+import argparse
 import json
 import logging
-import argparse
+import os
 import smtplib
 import ssl
-import os
 import sys
 from datetime import datetime
-from typing import List
-from time import sleep
 from email.message import EmailMessage
+from signal import signal, SIGINT
+from time import sleep
+from typing import List
+
+from dateutil.parser import parse
+
+from availability import Availability
+from campground import Campground, CampgroundList
+from ridb_interface import get_facilities_from_ridb
+from utils import exit_gracefully, setup_logging
+
 # import asyncio
 # import aiosmtplib
-from selenium.webdriver.chrome.webdriver import WebDriver
-from scrape_availability import create_selenium_driver, scrape_campground
-from ridb_interface import get_facilities_from_ridb
-from campground import Campground, CampgroundList
-from utils import exit_gracefully, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,7 @@ CARRIER_MAP = {
 }
 RETRY_WAIT = 300
 
-def email_notification(message: EmailMessage) -> None:
+def email_notification(message: EmailMessage) -> bool:
     """
     We send both texts and emails via this base function. For now, we're hardcoding GMAIL
     as our email service because that's what we use in development. Another user/dev should
@@ -124,12 +127,13 @@ def get_all_campgrounds_by_id(user_facs: List[str]=None, ridb_facs: List[str]=No
 
     return campgrounds_from_facilities
 
-def compare_availability(selenium_driver: WebDriver, campground_list: CampgroundList, start_date, num_days: int, num_sites: int = 1) -> CampgroundList:
+
+def compare_availability(availability, campground_list: CampgroundList, start_date, num_days: int, num_sites: int = 1) -> CampgroundList:
     """
     Given a list of Campground objects, find out if any campgrounds' availability has changed
     since the last time we looked.
 
-    :param campgrounds: list of Campground objects we want to check against
+    :param campground_list: list of Campground objects we want to check against
     :returns: N/A
     """
     available = CampgroundList()
@@ -138,7 +142,7 @@ def compare_availability(selenium_driver: WebDriver, campground_list: Campground
         if campground.sites_available:
             logger.debug("Skipping %s (%s) because an available site already found", campground.name, campground.id)
             continue
-        campground.sites_available = scrape_campground(selenium_driver, campground, start_date, num_days, num_sites)
+        campground.sites_available = availability.search(campground, start_date, num_days, num_sites)
         if campground.sites_available:
             logger.info("%s (%s) is now available! Adding to email list and removing from active search list.", campground.name, campground.id)
             campground.available = True
@@ -158,7 +162,7 @@ def compare_availability(selenium_driver: WebDriver, campground_list: Campground
 
     return available
 
-def send_alerts(available_campgrounds: CampgroundList) -> None:
+def send_alerts(available_campgrounds: CampgroundList) -> bool:
     """
     Builds and sends 2 emails:
       - one for an email alert sent to a convetional email address
@@ -190,8 +194,8 @@ def send_alerts(available_campgrounds: CampgroundList) -> None:
     text_alert_msg.set_content(content)
 
     # send alerts; retry 5 times if doesn't succeed; exit gracefully if fails repeatedly
-    res = email_notification(email_alert_msg) and email_notification(text_alert_msg)
-    return res
+    # res = email_notification(email_alert_msg) and email_notification(text_alert_msg)
+    return False
 
 def parse_start_day(arg: str) -> datetime:
     """
@@ -200,7 +204,7 @@ def parse_start_day(arg: str) -> datetime:
     :param arg: date represented as a string
     :returns: datetime object representing the user-provided day
     """
-    return datetime.strptime(arg, "%m/%d/%Y")
+    return parse(arg)
 
 def parse_id_args(arg: str) -> List[str]:
     """
@@ -264,23 +268,22 @@ def run():
     search_list = get_all_campgrounds_by_id(args.campground_ids, ridb_facilities)
     logger.info(json.dumps(search_list.serialize(), indent=2))
 
-    driver = create_selenium_driver()
+    driver = Availability()
 
     # check campground availability until stopped by user OR start_date has passed
     # OR no more campgrounds in search_list
     while True:
         if args.start_date < datetime.now():
             logger.info("Desired start date has passed, ending process...")
-            exit_gracefully(None, None, driver)
-        available = compare_availability(driver, search_list,
-            args.start_date, args.num_days, args.num_sites)
+        available = compare_availability(driver, search_list, args.start_date, args.num_days, args.num_sites)
         if len(available) > 0:
             if not send_alerts(available):
-                exit_gracefully(None, None, driver)
+                logging.error("Could not send alerts.")
+                return
         if len(search_list) == 0:
             logger.info(("All campgrounds to be searched have either been found or ",
                         "encountered multiple errors, ending process..."))
-            exit_gracefully(None, None, driver)
+            return
         sleep(RETRY_WAIT)  # sleep for RETRY_WAIT time before checking search_list again
 
 if __name__ == "__main__":

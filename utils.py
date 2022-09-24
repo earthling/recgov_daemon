@@ -11,8 +11,9 @@ from selenium.webdriver.chrome.webdriver import WebDriver
 
 logger = logging.getLogger(__name__)
 
+
 # pylint: disable-next=unused-argument
-def exit_gracefully(signal_received, frame, close_this_driver: WebDriver=None):
+def exit_gracefully(signal_received, frame, close_this_driver: WebDriver = None):
     """
     Handler for SIGINT that will close webdriver carefully if necessary.
     Ref: https://www.devdungeon.com/content/python-catch-sigint-ctrl-c
@@ -20,18 +21,23 @@ def exit_gracefully(signal_received, frame, close_this_driver: WebDriver=None):
 
     :param signal_received: signal object received by handler
     :param frame: actually have no idea what this is and we never use it...
-    :param driver: Selenium WebDriver to close before exiting
+    :param close_this_driver: Selenium WebDriver to close before exiting
     :returns: N/A
     """
     exit_msg = ("Received CTRL-C/SIGNINT or daemon completed;",
                 "exiting gracefully/closing WebDriver if initialized.")
     logger.info(exit_msg)
+    quit_selenium(close_this_driver)
+    sys.exit(0)
+
+
+def quit_selenium(close_this_driver):
     if close_this_driver is not None:
         # use quit instead of close to avoid tons of leftover chrome processes
         # https://stackoverflow.com/questions/15067107/difference-between-webdriver-dispose-close-and-quit
         close_this_driver.quit()
         logger.info("WebDriver Quit Successfully")
-    sys.exit(0)
+
 
 def set_low_network_quality(driver: WebDriver) -> None:
     """
