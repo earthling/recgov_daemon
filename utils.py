@@ -94,7 +94,7 @@ def setup_logging() -> None:
                                                 when="d", interval=1, backupCount=5)
     rotating_handler.suffix = "%Y-%m-%d"
     logging.basicConfig(
-        handlers=[rotating_handler],
+        handlers=[rotating_handler, logging.StreamHandler()],
         level=logging.INFO,
         format="[%(asctime)s] %(levelname)-8s [%(filename)s:%(lineno)d:%(funcName)s] %(message)s",
     )

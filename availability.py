@@ -17,7 +17,9 @@ class Availability(object):
     def search(self, campground: Campground, start_date: dt.date, num_nights: int, num_sites: int) -> bool:
         availability = self._provider.get_availability(campground.id, start_date)
         dates = search(availability, MinimumStayLength(num_nights, num_sites=num_sites))
-        logging.info("%s has dates: %s", campground.id, dates)
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            formatted = [dt.datetime.strftime(date, "%Y-%m-%d") for date in dates]
+            logging.info("%s has dates: %s", campground.name, formatted)
         return len(dates) > 0
 
 

@@ -7,13 +7,16 @@ as json to extract campsite names and facility IDs. See below links for details:
 https://www.recreation.gov/use-our-data
 https://ridb.recreation.gov/docs#/
 """
-import datetime
+import datetime as dt
 import json
 import logging
 import os
-from typing import Tuple, Dict
-import datetime as dt
+import typing
+from typing import Dict
+
 import requests
+
+from campground import Campground
 
 AVAILABILITY_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # set in ~/.virtualenvs/recgov_daemon/bin/postactivate
 API_KEY = os.environ.get("ridb_api_key")
-RIDB_BASE_URL = "https://ridb.recreation.gov/api/v1/facilities"
+RIDB_BASE_URL = "https://ridb.recreation.gov/api/v1"
 RECDATA_ELEM = "RECDATA"
 FACILITY_TYPE_FIELD = "FacilityTypeDescription"
 FACILITY_ID_FIELD = "FacilityID"
@@ -29,10 +32,10 @@ FACILITY_NAME_FIELD = "FacilityName"
 
 
 class AvailabilityProvider(object):
-    def request_availability(self, facility_id: str, start_date: dt.date) -> Dict:
+    def request_availability(self, facility_id: int, start_date: dt.date) -> Dict:
         pass
 
-    def get_availability(self, facility_id: str, start_date: dt.date) -> Dict[str, Dict]:
+    def get_availability(self, facility_id: int, start_date: dt.date) -> Dict[str, Dict]:
 
         available_sites = dict()
         max_look_ahead_months = 3
@@ -57,7 +60,7 @@ class AvailabilityProvider(object):
                 availabilities = []
                 for date, status in availability_data.items():
                     if status.lower() == "available":
-                        available_date = datetime.datetime.strptime(date, AVAILABILITY_DATETIME_FORMAT)
+                        available_date = dt.datetime.strptime(date, AVAILABILITY_DATETIME_FORMAT)
                         availabilities.append(available_date.date())
 
                 if len(availabilities) > 0:
@@ -69,7 +72,7 @@ class AvailabilityProvider(object):
 
 
 class OnlineAvailabilityProvider(AvailabilityProvider):
-    def request_availability(self, facility_id: str, start_date: dt.date):
+    def request_availability(self, facility_id: id, start_date: dt.date):
         # They will accept this user agent, but will not accept the python requests default
         headers = {
             "user-agent": "curl/7.68.0"
@@ -93,7 +96,7 @@ class OfflineAvailabilityProvider(AvailabilityProvider):
         self.response_files = list(args)
         self.response_files.reverse()
 
-    def request_availability(self, facility_id: str, start_date: dt.date) -> Dict:
+    def request_availability(self, facility_id: id, start_date: dt.date) -> Dict:
         response_file = self.response_files.pop()
         with open(response_file, "r") as data:
             return json.load(data)
@@ -105,11 +108,11 @@ def extract_next_month(quantities) -> dt.date:
         last_date = date
     # 2022-09-10T00:00:00Z
     date = dt.datetime.strptime(last_date, AVAILABILITY_DATETIME_FORMAT)
-    next_date = date + datetime.timedelta(days=1)
+    next_date = date + dt.timedelta(days=1)
     return next_date.date() if date.month < next_date.month else None
 
 
-def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> [Tuple[str, str]]:
+def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> typing.Set[Campground]:
     """
     Calls RIDB API with a location and search radius, and returns campground names and RDIB
     facility ID strings.
@@ -121,22 +124,22 @@ def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> 
     :raises KeyError: if can't find expected facility type/recdata element fields in resp json
     :returns: set of (name, facility_id) tuples
     """
+
+    return query_facilities(latitude=str(latitude),
+                            longitude=str(longitude),
+                            radius=str(radius))
+
+
+def query_facilities(**kwargs) -> typing.Set[Campground]:
     headers = {
         "accept": "application/json",
         "apikey": API_KEY
     }
-    facilities_query = {
-        "latitude": str(latitude),
-        "longitude": str(longitude),
-        "radius": str(radius),
-        "FacilityTypeDescription": "Campground",
-        # "Reservable": "True",
-        # "lastupdated": "01-01-2021",
-        "limit": 20
-    }
-
+    query = kwargs
+    query["limit"] = 20
+    query["FacilityTypeDescription"] = "Campground"
     logger.debug("\tUse requests library to retrieve facilities from RIDB API")
-    resp = requests.get(RIDB_BASE_URL, headers=headers, params=facilities_query, timeout=60)
+    resp = requests.get(RIDB_BASE_URL + "/facilities", headers=headers, params=query, timeout=60)
     if not resp.ok:
         raise ValueError("Unable to access RIDB API. Check connection and API key.")
     try:
@@ -147,18 +150,34 @@ def get_facilities_from_ridb(latitude: float, longitude: float, radius: int) -> 
     logger.info("Received %d results from RIDB, parsing campground info...", len(res))
 
     # Construct list of campground names/facility IDs from ridb response
-    facilities = []
+    facilities = set()
     for campsite in res:
         try:
-            facility_id = str(campsite[FACILITY_ID_FIELD])
-            name = " ".join(w.capitalize() for w in campsite[FACILITY_NAME_FIELD].split())
-            facilities.append((name, facility_id))
+            facility_id = int(campsite[FACILITY_ID_FIELD])
+            name = to_proper_case(campsite[FACILITY_NAME_FIELD])
+            facilities.add(Campground(name, facility_id))
         except KeyError as err:
             err_msg = "No %s or %s field in campground dict. Check RIDB API specs."
             raise KeyError(err_msg.format(FACILITY_ID_FIELD, FACILITY_NAME_FIELD)) from err
     logger.info("Parsed %d facilities from %d RIDB results", len(facilities), len(res))
 
     return facilities
+
+
+def to_proper_case(campground_name):
+    return " ".join(w.capitalize() for w in campground_name.split())
+
+
+def get_facility_name_for_id(facility_id: int) -> str:
+    headers = {
+        "accept": "application/json",
+        "apikey": API_KEY
+    }
+    response = requests.get(RIDB_BASE_URL + "/facilities/%s" % facility_id, headers=headers)
+    if not response.ok:
+        raise ValueError("Could not find facility with id: %s" % facility_id)
+    facility = response.json()
+    return to_proper_case(facility[FACILITY_NAME_FIELD])
 
 
 def run():
