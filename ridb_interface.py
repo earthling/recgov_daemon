@@ -8,6 +8,7 @@ https://www.recreation.gov/use-our-data
 https://ridb.recreation.gov/docs#/
 """
 import datetime as dt
+from dateutil.relativedelta import relativedelta
 import json
 import logging
 import os
@@ -38,11 +39,12 @@ class AvailabilityProvider(object):
     def get_availability(self, facility_id: int, start_date: dt.date) -> Dict[str, Dict]:
 
         available_sites = dict()
-        max_look_ahead_months = 3
+        max_look_ahead_months = 2
         months_fetched = 0
         while start_date and months_fetched < max_look_ahead_months:
             data = self.request_availability(facility_id, start_date)
             months_fetched += 1
+            start_date += relativedelta(months=1)
 
             campsites = data["campsites"]
             for site_id, site_data in campsites.items():
@@ -52,9 +54,9 @@ class AvailabilityProvider(object):
                 # field. I have observed that when this list does not contain the
                 # last day of the month, there will be no availability information
                 # after the last day of the quantities list.
-                quantities = site_data["quantities"]
-                if len(quantities) > 0:
-                    start_date = extract_next_month(quantities)
+                # quantities = site_data["quantities"]
+                # if len(quantities) > 0:
+                #     start_date = extract_next_month(quantities)
 
                 availability_data = site_data.pop("availabilities")
                 availabilities = []

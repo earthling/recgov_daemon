@@ -12,8 +12,6 @@ RECGOV_BASE_URL = "https://www.recreation.gov/camping/campgrounds"
 class Campground(NamedTuple):
     name: str
     id: int
-    sites_available: int = 0
-    error_count: int = 0
 
     @property
     def url(self):

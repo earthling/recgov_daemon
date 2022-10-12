@@ -1,26 +1,15 @@
 import datetime as dt
 import logging
 import typing
+# noinspection PyProtectedMember
+from calendar import MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
+from parser import ParserError
 from typing import Dict
 
-from dateutil.relativedelta import relativedelta
-from dateutil.rrule import *
+from dateutil.parser import parse
 
 from campground import Campground
 from ridb_interface import OnlineAvailabilityProvider
-
-
-class Availability(object):
-    def __init__(self):
-        self._provider = OnlineAvailabilityProvider()
-
-    def search(self, campground: Campground, start_date: dt.date, num_nights: int, num_sites: int) -> bool:
-        availability = self._provider.get_availability(campground.id, start_date)
-        dates = search(availability, MinimumStayLength(num_nights, num_sites=num_sites))
-        if logging.getLogger().isEnabledFor(logging.INFO):
-            formatted = [dt.datetime.strftime(date, "%Y-%m-%d") for date in dates]
-            logging.info("%s has dates: %s", campground.name, formatted)
-        return len(dates) > 0
 
 
 class Criteria(object):
@@ -30,29 +19,25 @@ class Criteria(object):
     def matches(self, site_availability: typing.Dict) -> Dict:
         return {}
 
-    @staticmethod
-    def days_of_week(*nights_to_stay: [int], start_date: dt.date = None,
-                     look_ahead_months: int = 3,
-                     num_sites: int = 0):
-        if start_date is None:
-            start_date = dt.date.today()
+    def reset(self) -> None:
+        pass
 
-        end_date = start_date + relativedelta(months=look_ahead_months)
-        end_date = dt.datetime(end_date.year, end_date.month, end_date.day)
 
-        stays = []
-        dates = iter(rrule(WEEKLY, byweekday=nights_to_stay, until=end_date))
-        try:
-            while True:
-                stay = []
-                for _ in nights_to_stay:
-                    date = next(dates)
-                    stay.append(date.date())
-                stays.append(ConsecutiveDateSearch(*stay, num_sites=num_sites))
-        except StopIteration:
-            pass
+class Availability(object):
+    def __init__(self):
+        self._provider = OnlineAvailabilityProvider()
 
-        return Stay(*stays)
+    def search(self, campground: Campground, criteria: Criteria) -> bool:
+        availability = self._provider.get_availability(campground.id, dt.date.today())
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            available_dates = index_by_date(availability)
+            formatted = [dt.datetime.strftime(date, "%Y-%m-%d %a") for date in available_dates]
+            logging.info("%s has dates: %s", campground.name, formatted)
+        dates = search(availability, criteria)
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            formatted = [dt.datetime.strftime(date, "%Y-%m-%d %a") for date in dates]
+            logging.info("%s has dates that meet criteria: %s", campground.name, formatted)
+        return len(dates) > 0
 
 
 class Stay(Criteria):
@@ -70,26 +55,59 @@ class Stay(Criteria):
             result.extend(criteria.matches(site_availability))
         return result
 
+    def reset(self) -> None:
+        for criteria in self.criteria:
+            criteria.reset()
+
 
 class MinimumStayLength(Criteria):
-    def __init__(self, nights: int, num_sites: int = 0):
+    def __init__(self, nights: int, num_sites: int = 0, first_night: dt.date = None, first_week_day: int = -1):
+        if first_night and first_week_day != -1:
+            raise ValueError("Cannot set first_night and first_week_day together")
+
         self._nights = nights
         self._num_sites = num_sites
-        self._dates = []
+        self._first_night = first_night
+        self._first_week_day = int(first_week_day)
+        self._matches = []
+
+    def reset(self):
+        self._matches.clear()
 
     def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
+        if self._first_night:
+            if self._first_night not in dates:
+                return True
+            else:
+                ordered = sorted(list(dates))
+                first_index = ordered.index(self._first_night)
+                dates = ordered[first_index:]
+        elif self._first_week_day != -1:
+            first_index = 0
+            found = False
+            ordered = sorted(list(dates))
+            for d in ordered:
+                if d.weekday() == self._first_week_day:
+                    found = True
+                    break
+                first_index += 1
+            if found:
+                dates = ordered[first_index:first_index + self._nights]
+            else:
+                return True
+
         if len(dates) >= self._nights:
-            self._dates.append(dates)
+            self._matches.append(dates)
         return True
 
     def matches(self, site_availability: typing.Dict) -> typing.Sequence[dt.date]:
         results = []
         if self._num_sites == 0:
-            for span in self._dates:
+            for span in self._matches:
                 results.extend(span)
             return results
 
-        for span in self._dates:
+        for span in self._matches:
             if find_sites(span, site_availability, self._num_sites):
                 results.extend(span)
         return results
@@ -100,6 +118,10 @@ class MaximumStayLength(Criteria):
         self._max_nights = -1
         self._max_dates = []
         self._num_sites = num_sites
+
+    def reset(self) -> None:
+        self._max_nights = -1
+        self._max_dates.clear()
 
     def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
         if len(dates) > self._max_nights:
@@ -126,41 +148,6 @@ class MaximumStayLength(Criteria):
         return max_stays_for_sites
 
 
-class ExactDateSearch(Criteria):
-    def __init__(self, *dates: [dt.date]):
-        self._desired_dates = set(dates)
-        self._matches = []
-
-    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
-        matches = dates.intersection(self._desired_dates)
-        if len(matches) > 0:
-            self._matches.extend(matches)
-        return True
-
-    def matches(self, site_availability: typing.Dict) -> typing.Sequence[dt.date]:
-        return self._matches
-
-
-class ConsecutiveDateSearch(Criteria):
-    def __init__(self, *dates: [dt.date], num_sites=0):
-        self._dates = set(dates)
-        self._matches = []
-        self._num_sites = num_sites
-
-    def test(self, site_id: str, dates: typing.Set[dt.date]) -> bool:
-        if self._dates.issubset(dates):
-            self._matches.extend(self._dates)
-        return True
-
-    def matches(self, site_availability: typing.Dict) -> typing.Sequence[dt.date]:
-        if self._num_sites == 0 or len(self._matches) == 0:
-            return self._matches
-
-        if find_sites(self._matches, site_availability, self._num_sites):
-            return self._matches
-        return []
-
-
 def find_sites(dates: [dt.date], availability: typing.Dict, num_sites: int):
     sites = None
     for d in dates:
@@ -176,6 +163,7 @@ def find_sites(dates: [dt.date], availability: typing.Dict, num_sites: int):
 
 
 def search(availability: Dict, criteria: Criteria) -> typing.Sequence[dt.date]:
+    criteria.reset()
     available_dates = index_by_date(availability)
     dates = list(available_dates.keys())
     spans = consecutive(dates)
@@ -220,3 +208,33 @@ def consecutive(dates: typing.List[dt.date]) -> [typing.Tuple]:
     runs.append((start, end + 1))
     return runs
 
+
+DAYS_OF_WEEK = {"MO": MONDAY, "TU": TUESDAY, "WE": WEDNESDAY, "TH": THURSDAY,
+                "FR": FRIDAY, "SA": SATURDAY, "SU": SUNDAY}
+
+
+def parse_search_options(dates: typing.List[str], num_nights: int = 1, num_sites: int = 1) -> Criteria:
+    if len(dates) == 0:
+        if num_nights == 0:
+            raise ValueError("No dates given and no nights requested.")
+        return MinimumStayLength(num_nights, num_sites=num_sites)
+
+    stays = []
+    for date in dates:
+        if date == "max":
+            return MaximumStayLength(num_sites=num_sites)
+
+        if date.upper() in DAYS_OF_WEEK:
+            day = DAYS_OF_WEEK[date.upper()]
+            stays.append(MinimumStayLength(num_nights, num_sites=num_sites, first_week_day=day))
+            continue
+
+        try:
+            parsed = parse(date).date()
+            criteria = MinimumStayLength(num_nights, num_sites=num_sites, first_night=parsed)
+            stays.append(criteria)
+        except ParserError:
+            raise ValueError("Could not parse: %s" % date)
+
+    if len(stays) > 0:
+        return Stay(*stays)

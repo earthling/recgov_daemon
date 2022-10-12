@@ -6,21 +6,16 @@ for a list of campgrounds provided by the user or found in RIDB search.
 """
 
 import argparse
-import json
 import logging
 import os
 import smtplib
 import ssl
-import sys
-from datetime import datetime
 from email.message import EmailMessage
 from signal import signal, SIGINT
 from time import sleep
 from typing import Set, Sequence
 
-from dateutil.parser import parse
-
-from availability import Availability
+from availability import Availability, Criteria, parse_search_options
 from campground import Campground
 from locations import resolve_locations
 from utils import exit_gracefully, setup_logging
@@ -92,33 +87,27 @@ def email_notification(message: EmailMessage) -> bool:
     return True
 
 
-def compare_availability(availability: Availability, campground_list: Set[Campground],
-                         start_date, num_days: int, num_sites: int = 1) -> Sequence[Campground]:
+def compare_availability(availability: Availability,
+                         campground_list: Set[Campground], criteria: Criteria) -> Sequence[Campground]:
     """
     Given a list of Campground objects, find out if any campgrounds' availability has changed
     since the last time we looked.
-
+    :param availability: Used to coordinate searching
     :param campground_list: list of Campground objects we want to check against
-    :returns: N/A
+    :param criteria: The availability search criteria
+    :returns: list of campgrounds with availability matching search criteria
     """
     available = list()
     search_list = list(campground_list)
     for campground in search_list:
         logger.debug("Checking availability for %s", campground)
-        sites_available = availability.search(campground, start_date, num_days, num_sites)
+        sites_available = availability.search(campground, criteria)
         if sites_available:
             logger.info("%s is now available! Adding to email list and removing from active search list.", campground)
             available.append(campground)
             campground_list.remove(campground)
         else:
             logger.info("%s is not available, trying again in %s seconds", campground, RETRY_WAIT)
-
-        # if campground parsing has errored more than 5 times in a row
-        # remove it from the CampgroundList so we can stop checking it and failing
-        if campground.error_count > 5:
-            err_msg = f"Campground errored more than 5 times in a row, removing it from list:\n{campground}"
-            logger.error(err_msg)
-            campground_list.remove(campground)
 
     return available
 
@@ -145,14 +134,13 @@ def send_alerts(available_campgrounds: Sequence[Campground], email: str, text_nu
 def build_text_message(available_campgrounds, carrier, text_number):
     carrier_domain = CARRIER_MAP[carrier]
     to_email = f"{text_number}@{carrier_domain}"
-    return build_email_message(available_campgrounds, to_email)
+    message = email_start(available_campgrounds, to_email)
+    message.set_content("")
+    return message
 
 
 def build_email_message(available_campgrounds, email):
-    email_alert_msg = EmailMessage()
-    email_alert_msg["From"] = GMAIL_USER
-    email_alert_msg["To"] = email
-    email_alert_msg["Subject"] = f"{len(available_campgrounds)} New Campgrounds Available"
+    email_alert_msg = email_start(available_campgrounds, email)
     content = "The following campgrounds are now available!\n"
     for campground in available_campgrounds:
         content += f"\n{campground.name} {campground.url}"
@@ -160,45 +148,12 @@ def build_email_message(available_campgrounds, email):
     return email_alert_msg
 
 
-def parse_start_day(arg: str) -> datetime:
-    """
-    Parse user input start date as Month/Day/Year (e.g. 05/19/2021).
-
-    :param arg: date represented as a string
-    :returns: datetime object representing the user-provided day
-    """
-    return parse(arg).date()
-
-
-def validate_carrier(arg: str) -> str:
-    """
-    Carrier has to be something that we can map back to a gateway, so
-    check that the entered text is a key in the carrier map dict. Accept
-    mixture of uppercase/lowercase just to be nice.
-
-    :param arg: the user-entered carrier name
-    :returns: lowercase str version of the entered carrier if present in carrier map dict
-    """
-    lowercase_arg = arg.lower()
-    if lowercase_arg not in CARRIER_MAP:
-        logger.error("KeyError: carrier '%s' not found in CARRIER_MAP dict:\n%s",
-                     lowercase_arg, json.dumps(CARRIER_MAP))
-        sys.exit(1)
-    return lowercase_arg
-
-
-def validate_num_sites(arg: str) -> int:
-    """
-    Number of campsites has to be an integer >= 1 for sanity's sake.
-
-    :param arg: user-entered number of sites
-    :returns: integer >= 1
-    """
-    arg = int(arg)
-    if arg < 1:
-        logger.error("User input for number of campsites (%d) too small (must be > 1)", arg)
-        sys.exit(1)
-    return arg
+def email_start(available_campgrounds, email):
+    email_alert_msg = EmailMessage()
+    email_alert_msg["From"] = GMAIL_USER
+    email_alert_msg["To"] = email
+    email_alert_msg["Subject"] = f"{len(available_campgrounds)} New Campgrounds Available"
+    return email_alert_msg
 
 
 def run():
@@ -206,14 +161,14 @@ def run():
     Run the daemon after SIGINT has been captured and arguments have been parsed.
     """
 
-    facilities = resolve_locations(args.where)
+    facilities = resolve_locations(args.where, args.radius)
     driver = Availability()
+    criteria = parse_search_options(args.when, args.num_nights, args.num_sites)
 
     # check campground availability until stopped by user OR start_date has passed
     # OR no more campgrounds in search_list
     while True:
-        start_date = max(args.start_date, datetime.now().date())
-        available = compare_availability(driver, facilities, start_date, args.num_nights, args.num_sites)
+        available = compare_availability(driver, facilities, criteria)
         if len(available) > 0:
             if not send_alerts(available, args.email, args.text, args.carrier):
                 logging.error("Could not send alerts.")
@@ -230,18 +185,23 @@ if __name__ == "__main__":
     ARG_DESC = """Daemon to check recreation.gov and RIDB for new campground availability and send notification email
         when new availability found."""
     parser = argparse.ArgumentParser(description=ARG_DESC)
-    parser.add_argument("-s", "--start_date", type=parse_start_day, required=True,
-                        help="First day you want to reserve a site, represented as Month/Day/Year (e.g. 05/19/2021).")
-    parser.add_argument("-n", "--num_nights", type=int, required=True,
+    parser.add_argument("-s", "--when", type=str, action="append",
+                        help="The date of any nights you want to camp. If `--num_nights` is given, the dates given"
+                             " will be treated as the first night of your stay. Days of the week may also be given."
+                             " You may also use 'max' to search for the maximum length stay at any campground. If"
+                             " no dates are given and `--num_nights` is given, search for any campground with at"
+                             " least this many consecutive nights available on any dates.")
+    parser.add_argument("-n", "--num_nights", type=int,
                         help="Number of nights you want to camp (e.g. 2).")
     parser.add_argument("-e", "--email", type=str, required=True,
                         help="Email address at which you want to receive notifications (ex: first.last@example.com).")
     parser.add_argument("-t", "--text", type=str,
                         help="Phone number at which you want to receive text notifications (ex: 9998887777).")
-    parser.add_argument("-c", "--carrier", type=validate_carrier, choices=CARRIER_MAP.keys(),
+    parser.add_argument("-c", "--carrier", choices=CARRIER_MAP.keys(),
                         help="Cell carrier for your phone number, required to send texts.")
-    parser.add_argument("--num_sites", type=validate_num_sites,
-                        help="Number of campsites you need at each campground; defaults to 1, validated to be >0.")
+    parser.add_argument("--num_sites", type=int, default=1,
+                        help="Number of campsites you need at each campground; "
+                             "this can be zero if you don't mind changing sites.")
     parser.add_argument("--where", type=str, action="append",
                         help="Can be 'City, State', 'Lat,Long', 'Campsite Name' or 'Campsite ID'")
     parser.add_argument("-r", "--radius", type=int,
